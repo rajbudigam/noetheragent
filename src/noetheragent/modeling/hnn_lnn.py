@@ -18,6 +18,10 @@ def simulate_vector_field(f, x0, T, dt):
     x = np.zeros((n, 2), dtype=np.float64)
     x[0] = x0
     for k in range(n - 1):
+        step = f(torch.from_numpy(x[k].astype(np.float64))).numpy()
+        # Defensive shape check
+        if step is None or np.asarray(step).shape != (2,):
+            raise ValueError(f"Vector field output at step {k} has shape {np.asarray(step).shape}, expected (2,)")
         x[k + 1] = rk4_step(lambda s: f(torch.from_numpy(s.astype(np.float64))).numpy(), x[k], dt)
     return t, x
 
@@ -54,7 +58,13 @@ class HNN:
         dH = torch.autograd.grad(H.sum(), x, create_graph=True)[0]
         dtheta_dt = dH[..., 1]                        # ∂H/∂p
         domega_dt = -dH[..., 0]                       # -∂H/∂θ
-        return torch.stack([dtheta_dt, domega_dt], dim=-1)
+        result = torch.stack([dtheta_dt, domega_dt], dim=-1)
+        # Defensive shape check
+        if result.shape[-1] != 2:
+            raise ValueError(f"HNN.vector_field output shape {result.shape} is not (..., 2)")
+        if result.ndim == 1:
+            result = result.unsqueeze(0)
+        return result.squeeze(0) if result.shape[0] == 1 else result
 
     def fit(self, X: np.ndarray, Xdot: np.ndarray):
         cfg = self.cfg
@@ -65,16 +75,21 @@ class HNN:
             idx = torch.randint(0, X_t.shape[0], (min(cfg.batch, X_t.shape[0]),))
             xb, yb = X_t[idx], Y_t[idx]
             pred = self.vector_field(xb)
+            if pred.shape != yb.shape:
+                raise ValueError(f"HNN.fit: prediction shape {pred.shape} does not match target {yb.shape}")
             loss = ((pred - yb)**2).mean()
             opt.zero_grad(); loss.backward(); opt.step()
 
     def simulate(self, x0: np.ndarray, T: float, dt: float) -> Tuple[np.ndarray, np.ndarray]:
-        f = lambda s: self.vector_field(s).detach().numpy()
         def vf_np(s_np):
-            s_t = torch.from_numpy(s_np).double()
-            return self.vector_field(s_t).detach().numpy()
-        return simulate_vector_field(lambda s: torch.from_numpy(vf_np(s)),
-                                     x0.astype(np.float64), T, dt)
+            s_t = torch.from_numpy(s_np.astype(np.float64)).double()
+            out = self.vector_field(s_t).detach().numpy()
+            if out.shape == (1,2):
+                out = out[0]
+            if out.shape != (2,):
+                raise ValueError(f"HNN.simulate: vector field returned shape {out.shape}, expected (2,)")
+            return out
+        return simulate_vector_field(lambda s: torch.from_numpy(vf_np(s)), x0.astype(np.float64), T, dt)
 
 # ---------- Minimal LNN ----------
 class UNet(nn.Module):
@@ -116,7 +131,13 @@ class LNNMinimal:
         theta = x[..., :1]
         omega = x[..., 1:2]
         dd = self.ddot(theta)
-        return torch.cat([omega, dd], dim=-1).squeeze(-1)
+        result = torch.cat([omega, dd], dim=-1)
+        # Defensive shape check
+        if result.shape[-1] != 2:
+            raise ValueError(f"LNNMinimal.vector_field output shape {result.shape} is not (..., 2)")
+        if result.ndim == 1:
+            result = result.unsqueeze(0)
+        return result.squeeze(0) if result.shape[0] == 1 else result
 
     def fit(self, X: np.ndarray, Xdot: np.ndarray):
         """
@@ -130,14 +151,18 @@ class LNNMinimal:
             idx = torch.randint(0, X_t.shape[0], (min(cfg.batch, X_t.shape[0]),))
             thb = X_t[idx, :1]
             pred_dd = self.ddot(thb)
+            if pred_dd.shape != dd_truth[idx].shape:
+                raise ValueError(f"LNNMinimal.fit: prediction shape {pred_dd.shape} does not match target {dd_truth[idx].shape}")
             loss = ((pred_dd - dd_truth[idx])**2).mean()
             opt.zero_grad(); loss.backward(); opt.step()
 
     def simulate(self, x0: np.ndarray, T: float, dt: float) -> Tuple[np.ndarray, np.ndarray]:
-        def vf_t(s_t: torch.Tensor) -> torch.Tensor:
-            return self.vector_field(s_t)
         def vf_np(s_np):
             s_t = torch.from_numpy(s_np.astype(np.float64)).double()
-            return vf_t(s_t).detach().numpy()
-        return simulate_vector_field(lambda s: torch.from_numpy(vf_np(s)),
-                                     x0.astype(np.float64), T, dt)
+            out = self.vector_field(s_t).detach().numpy()
+            if out.shape == (1,2):
+                out = out[0]
+            if out.shape != (2,):
+                raise ValueError(f"LNNMinimal.simulate: vector field returned shape {out.shape}, expected (2,)")
+            return out
+        return simulate_vector_field(lambda s: torch.from_numpy(vf_np(s)), x0.astype(np.float64), T, dt)
