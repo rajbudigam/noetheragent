@@ -19,6 +19,10 @@ jobs:
           source .venv/bin/activate
           pip install -r requirements.txt
           pip install pytest
+
+      - name: Install noetheragent package
+        run: pip install -e .
+  
       - name: Smoke pipeline (fast)
         run: |
           source .venv/bin/activate
