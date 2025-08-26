@@ -41,13 +41,14 @@ def dump_versions():
 
 def discover_with_sindy(params: PendulumParams, seeds=6, T=6.0, dt=0.01):
     rng = np.random.default_rng(123)
-    thetas0 = rng.uniform(low=0.05, high=1.2, size=seeds) * rng.choice([-1,1], size=seeds)
-    omegas0 = np.zeros_like(thetas0)
-    _, X, Xdot = stack_trajectories(thetas0, omegas0, T, dt, params)
-    # Construct a synthetic time vector matching concatenation
+    # Broader ICs: amplitudes and initial velocities
+    thetas0 = rng.uniform(low=0.1, high=1.6, size=seeds) * rng.choice([-1,1], size=seeds)
+    omegas0 = rng.uniform(low=-1.5, high=1.5, size=seeds)
+
+    _, X, _ = stack_trajectories(thetas0, omegas0, T, dt, params)
     t = np.tile(np.linspace(0.0, T, int(T/dt)+1), seeds)
 
-    model = fit_sindy(X, t, library_kind="fourier", n_frequencies=1, threshold=0.05)
+    model = fit_sindy(X, t, library_kind="custom", threshold=0.08)
     (ART/"sindy_model.txt").write_text("\n".join(model.equations()))
     return model
 
