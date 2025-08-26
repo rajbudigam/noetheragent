@@ -1,120 +1,173 @@
 import json
-import os
-import argparse
 from pathlib import Path
 import numpy as np
 from tqdm import tqdm
 import importlib
+import argparse
 
 from noetheragent.data.generate_pendulum import (
     PendulumParams, stack_trajectories, simulate_pendulum
 )
 from noetheragent.modeling.sindy_model import fit_sindy, sindy_predict
 from noetheragent.modeling.baselines import LinearizedPendulum, simulate as simulate_lin
-from noetheragent.design.oed_botorch import discrepancy_objective, suggest_next_theta0
+from noetheragent.modeling.hnn_lnn import HNN, HNNConfig, LNNMinimal, LNNConfig
+from noetheragent.design.oed_botorch import objective_score, suggest_next_theta0
 from noetheragent.util.metrics import long_horizon_rmse
 from noetheragent.util.plotting import plot_discrepancy, plot_trajectories
 
 ART = Path("artifacts"); ART.mkdir(exist_ok=True)
 
 def dump_versions():
-    pkgs = {
-        "numpy": "numpy",
-        "scipy": "scipy",
-        "pandas": "pandas",
-        "matplotlib": "matplotlib",
-        "sympy": "sympy",
-        "pysindy": "pysindy",
-        "torch": "torch",
-        "gpytorch": "gpytorch",
-        "botorch": "botorch",
-    }
+    pkgs = ["numpy","scipy","pandas","matplotlib","sympy","pysindy","torch","gpytorch","botorch"]
     lines = []
-    for name, mod in pkgs.items():
+    for mod in pkgs:
         try:
             m = importlib.import_module(mod)
             v = getattr(m, "__version__", "unknown")
         except Exception:
             v = "not-importable"
-        lines.append(f"{name}=={v}")
+        lines.append(f"{mod}=={v}")
     (ART / "VERSIONS.txt").write_text("\n".join(lines))
 
 def discover_with_sindy(params: PendulumParams, seeds=6, T=6.0, dt=0.01):
     rng = np.random.default_rng(123)
-    # Broader ICs: amplitudes and initial velocities
     thetas0 = rng.uniform(low=0.1, high=1.6, size=seeds) * rng.choice([-1,1], size=seeds)
     omegas0 = rng.uniform(low=-1.5, high=1.5, size=seeds)
-
     _, X, _ = stack_trajectories(thetas0, omegas0, T, dt, params)
     t = np.tile(np.linspace(0.0, T, int(T/dt)+1), seeds)
-
     model = fit_sindy(X, t, library_kind="custom", threshold=0.08)
-    (ART/"sindy_model.txt").write_text("\n".join(model.equations()))
-    return model
+    (ART/"sindy_model.txt").write_text(model.equations())
+    return model, (X, t)
 
-def rival_sim_fn_factory(sindy_model, params: PendulumParams, T, dt):
-    lin = LinearizedPendulum(g=params.g, L=params.L)
+def rival_sim_fn_factory(primary_model, rival_kind, trained, params: PendulumParams, T, dt):
+    """
+    primary_model: SINDy model (we compare others against it)
+    rival_kind: 'linear' | 'hnn' | 'lnn'
+    trained: dict with fitted rivals
+    """
+    lin = trained.get("linear")
+    hnn = trained.get("hnn")
+    lnn = trained.get("lnn")
+
     def sim(theta0):
-        _, xs = sindy_predict(sindy_model, np.array([theta0, 0.0]), T, dt)
-        _, xl = simulate_lin(lin, theta0, 0.0, T, dt)
+        # Primary (SINDy)
+        _, xs = sindy_predict(primary_model, np.array([theta0, 0.0]), T, dt)
+        # Rival
+        if rival_kind == "linear":
+            _, xr = simulate_lin(lin, theta0, 0.0, T, dt)
+        elif rival_kind == "hnn":
+            _, xr = hnn.simulate(np.array([theta0, 0.0]), T, dt)
+        elif rival_kind == "lnn":
+            _, xr = lnn.simulate(np.array([theta0, 0.0]), T, dt)
+        else:
+            raise ValueError("unknown rival_kind")
         t = np.linspace(0.0, T, int(T/dt)+1)
-        return t, xs, xl
+        return t, xs, xr
     return sim
 
 def parse_args():
     p = argparse.ArgumentParser(description="NoetherAgent pipeline")
-    p.add_argument("--T", type=float, default=6.0, help="trajectory length (s)")
-    p.add_argument("--dt", type=float, default=0.01, help="time step (s)")
-    p.add_argument("--seeds", type=int, default=8, help="num initial conditions for discovery")
-    p.add_argument("--grid", type=int, default=20, help="grid points for initial θ0 sweep")
+    p.add_argument("--T", type=float, default=6.0)
+    p.add_argument("--dt", type=float, default=0.01)
+    p.add_argument("--seeds", type=int, default=8)
+    p.add_argument("--grid", type=int, default=20)
+    # OED objective & rival
+    p.add_argument("--oed_objective", choices=["topt","kl"], default="topt",
+                   help="Design objective: T-opt or Gaussian KL surrogate")
+    p.add_argument("--noise_sigma", type=float, default=0.05,
+                   help="Obs noise (rad) for KL objective")
+    p.add_argument("--oed_rival", choices=["linear","hnn","lnn"], default="linear",
+                   help="Rival model vs SINDy in discrimination")
+    # Baseline training toggles (to keep CI fast)
+    p.add_argument("--train_hnn", action="store_true")
+    p.add_argument("--train_lnn", action="store_true")
+    p.add_argument("--hnn_epochs", type=int, default=250)
+    p.add_argument("--lnn_epochs", type=int, default=250)
     return p.parse_args()
 
 def main():
     args = parse_args()
     dump_versions()
-
     params = PendulumParams(g=9.81, L=1.0)
     T, dt = args.T, args.dt
 
     print("1) Discovery with SINDy...")
-    sindy_model = discover_with_sindy(params, seeds=args.seeds, T=T, dt=dt)
+    sindy_model, (X_train, t_train) = discover_with_sindy(params, seeds=args.seeds, T=T, dt=dt)
     print("Discovered equations:\n", sindy_model.equations())
 
-    print("2) Model discrimination — pick θ0 to separate rival laws...")
-    rival_sim = rival_sim_fn_factory(sindy_model, params, T=T, dt=dt)
+    print("2) Train rivals (opt-in)...")
+    trained = {}
+    # Linear rival always available
+    trained["linear"] = LinearizedPendulum(g=params.g, L=params.L)
+    # For HNN/LNN, compute Xdot targets from training trajectories
+    # Re-generate Xdot cheaply for the concatenated X_train
+    n = int(T/dt)+1
+    Xdot = np.zeros_like(X_train)
+    Xdot[1:-1] = (X_train[2:] - X_train[:-2]) / (2*dt)
+    Xdot[0] = (X_train[1] - X_train[0]) / dt
+    Xdot[-1] = (X_train[-1] - X_train[-2]) / dt
+
+    if args.train_hnn or args.oed_rival == "hnn":
+        hcfg = HNNConfig(epochs=args.hnn_epochs)
+        hnn = HNN(hcfg)
+        hnn.fit(X_train, Xdot)
+        trained["hnn"] = hnn
+        print("HNN trained.")
+    if args.train_lnn or args.oed_rival == "lnn":
+        lcfg = LNNConfig(epochs=args.lnn_epochs)
+        lnn = LNNMinimal(lcfg)
+        lnn.fit(X_train, Xdot)
+        trained["lnn"] = lnn
+        print("LNN (minimal) trained.")
+
+    print(f"3) Model discrimination objective = {args.oed_objective}, rival = {args.oed_rival}")
+    rival_sim = rival_sim_fn_factory(sindy_model, args.oed_rival, trained, params, T=T, dt=dt)
 
     # Evaluate initial θ0 grid
-    grid = np.linspace(0.05, 2.5, args.grid)
-    scores = [discrepancy_objective(th, rival_sim, T=T, dt=dt) for th in tqdm(grid)]
+    grid = np.linspace(0.1, 2.2, args.grid)
+    scores = [objective_score(th, rival_sim, T=T, dt=dt,
+                              objective=args.oed_objective, noise_sigma=args.noise_sigma)
+              for th in tqdm(grid)]
     np.save(ART/"initial_thetas.npy", grid)
     np.save(ART/"initial_scores.npy", scores)
 
-    # Suggest next θ0 via BoTorch
-    theta_next = suggest_next_theta0(bounds=(0.05, 2.5),
-                                     initial_thetas=grid.tolist(),
-                                     initial_scores=scores,
+    theta_next = suggest_next_theta0(bounds=(0.1, 2.2),
+                                     thetas=grid.tolist(),
+                                     scores=scores,
                                      n_candidates=1)[0]
     print(f"Suggested next θ0 (rad): {theta_next:.4f}")
 
-    # 3) Validate & compare trajectories
+    # Validate trajectories at θ0*
     t, x_truth = simulate_pendulum(theta_next, 0.0, T=T, dt=dt, params=params)
     _, x_sindy = sindy_predict(sindy_model, np.array([theta_next, 0.0]), T, dt)
-    lin = LinearizedPendulum(g=params.g, L=params.L)
-    _, x_lin = simulate_lin(lin, theta_next, 0.0, T, dt)
+    if args.oed_rival == "linear":
+        _, x_rival = simulate_lin(trained["linear"], theta_next, 0.0, T, dt)
+    elif args.oed_rival == "hnn":
+        _, x_rival = trained["hnn"].simulate(np.array([theta_next, 0.0]), T, dt)
+    else:
+        _, x_rival = trained["lnn"].simulate(np.array([theta_next, 0.0]), T, dt)
 
     rmse_sindy = long_horizon_rmse(x_truth[:,0], x_sindy[:,0])
-    rmse_lin   = long_horizon_rmse(x_truth[:,0], x_lin[:,0])
+    rmse_rival = long_horizon_rmse(x_truth[:,0], x_rival[:,0])
 
-    # Plots
-    plot_discrepancy(grid, scores, theta_next, ART/"discrepancy.png")
+    ylabel = "T-opt discrepancy" if args.oed_objective=="topt" else "Info gain (KL surrogate)"
+    plot_discrepancy(grid, scores, theta_next, ART/"discrepancy.png", ylabel=ylabel)
+    # We still plot linear vs truth vs SINDy for continuity, even if rival was HNN/LNN
+    lin_tmp = LinearizedPendulum(g=params.g, L=params.L)
+    _, x_lin = simulate_lin(lin_tmp, theta_next, 0.0, T, dt)
     plot_trajectories(t, x_truth, x_sindy, x_lin, ART/"trajectories.png")
 
     out = {
         "theta_next": float(theta_next),
+        "oed_objective": args.oed_objective,
+        "noise_sigma": args.noise_sigma,
+        "oed_rival": args.oed_rival,
         "rmse_angle_truth_vs_sindy": rmse_sindy,
-        "rmse_angle_truth_vs_linear": rmse_lin,
+        "rmse_angle_truth_vs_rival": rmse_rival,
         "sindy_equations": sindy_model.equations(),
         "T": T, "dt": dt, "seeds": args.seeds, "grid_points": args.grid,
+        "hnn_trained": bool("hnn" in trained),
+        "lnn_trained": bool("lnn" in trained),
     }
     (ART/"summary.json").write_text(json.dumps(out, indent=2))
     print(json.dumps(out, indent=2))
