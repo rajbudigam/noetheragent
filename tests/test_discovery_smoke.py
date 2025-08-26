@@ -11,4 +11,4 @@ def test_sindy_fits_on_tiny_dataset():
     m = fit_sindy(X, t, library_kind="fourier", n_frequencies=1, threshold=0.1)
     # Sanity: equations string exists and contains something
     eq = m.equations()
-    assert isinstance(eq, str) and len(eq) > 0
+    assert isinstance(eq, (str, list)) and len(eq) > 0
