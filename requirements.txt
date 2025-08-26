@@ -1,0 +1,13 @@
+numpy==1.26.4
+scipy==1.13.1
+matplotlib==3.8.4
+pandas==2.2.2
+sympy==1.12
+# PySINDy for SINDy discovery
+pysindy==1.7.5
+# BoTorch stack (CPU)
+torch==2.4.0+cpu --index-url https://download.pytorch.org/whl/cpu
+gpytorch==1.14
+botorch==0.15.1
+# utility
+tqdm==4.66.4
