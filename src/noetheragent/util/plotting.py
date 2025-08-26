@@ -1,15 +1,14 @@
 import matplotlib.pyplot as plt
-import numpy as np
 from pathlib import Path
 
-def plot_discrepancy(grid, scores, theta_next, outpath):
+def plot_discrepancy(grid, scores, theta_next, outpath, ylabel="T-opt discrepancy"):
     outpath = Path(outpath)
     outpath.parent.mkdir(parents=True, exist_ok=True)
     plt.figure(figsize=(6,4))
     plt.plot(grid, scores, linewidth=2)
     plt.axvline(theta_next, linestyle="--", linewidth=1.5)
     plt.xlabel(r"$\theta_0$ (rad)")
-    plt.ylabel("T-opt discrepancy")
+    plt.ylabel(ylabel)
     plt.title("Model-discrimination landscape")
     plt.tight_layout()
     plt.savefig(outpath, dpi=200)
