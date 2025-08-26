@@ -36,7 +36,7 @@ def discover_with_sindy(params: PendulumParams, seeds=6, T=6.0, dt=0.01):
     _, X, _ = stack_trajectories(thetas0, omegas0, T, dt, params)
     t = np.tile(np.linspace(0.0, T, int(T/dt)+1), seeds)
     model = fit_sindy(X, t, library_kind="custom", threshold=0.08)
-    (ART/"sindy_model.txt").write_text(model.equations())
+    (ART/"sindy_model.txt").write_text("\n".join(model.equations()))
     return model, (X, t)
 
 def rival_sim_fn_factory(primary_model, rival_kind, trained, params: PendulumParams, T, dt):
