@@ -30,33 +30,30 @@ def dump_versions():
     (ART / "VERSIONS.txt").write_text("\n".join(lines))
 
 def discover_with_sindy(params: PendulumParams, seeds=6, T=6.0, dt=0.01):
+    # Defensive: seeds must be >= 1
+    if seeds < 1:
+        raise ValueError(f"seeds must be >= 1, got {seeds}")
     rng = np.random.default_rng(123)
     thetas0 = rng.uniform(low=0.1, high=1.6, size=seeds) * rng.choice([-1,1], size=seeds)
     omegas0 = rng.uniform(low=-1.5, high=1.5, size=seeds)
     _, X, _ = stack_trajectories(thetas0, omegas0, T, dt, params)
-    # --- ADDED: Defensive check ---
     if X.size == 0:
-        raise ValueError("stack_trajectories returned empty X. Check parameter ranges and seeds.")
-    # --- END ADDED ---
+        raise ValueError(
+            f"stack_trajectories returned empty X. "
+            f"Check parameter ranges and seeds (seeds={seeds}, thetas0={thetas0}, omegas0={omegas0})."
+        )
     t = np.tile(np.linspace(0.0, T, int(T/dt)+1), seeds)
     model = fit_sindy(X, t, library_kind="custom", threshold=0.08)
     (ART/"sindy_model.txt").write_text("\n".join(model.equations()))
     return model, (X, t)
 
 def rival_sim_fn_factory(primary_model, rival_kind, trained, params: PendulumParams, T, dt):
-    """
-    primary_model: SINDy model (we compare others against it)
-    rival_kind: 'linear' | 'hnn' | 'lnn'
-    trained: dict with fitted rivals
-    """
     lin = trained.get("linear")
     hnn = trained.get("hnn")
     lnn = trained.get("lnn")
 
     def sim(theta0):
-        # Primary (SINDy)
         _, xs = sindy_predict(primary_model, np.array([theta0, 0.0]), T, dt)
-        # Rival
         if rival_kind == "linear":
             _, xr = simulate_lin(lin, theta0, 0.0, T, dt)
         elif rival_kind == "hnn":
@@ -91,12 +88,21 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    # Defensive: check seeds, T, dt
+    if args.seeds < 1:
+        raise ValueError(f"--seeds must be >= 1, got {args.seeds}")
+    if args.T <= 0 or args.dt <= 0:
+        raise ValueError(f"--T and --dt must be > 0, got T={args.T}, dt={args.dt}")
+
     dump_versions()
     params = PendulumParams(g=9.81, L=1.0)
     T, dt = args.T, args.dt
 
     print("1) Discovery with SINDy...")
     sindy_model, (X_train, t_train) = discover_with_sindy(params, seeds=args.seeds, T=T, dt=dt)
+    if X_train.size == 0:
+        raise ValueError("No training data produced by discover_with_sindy. Exiting.")
     print("Discovered equations:\n", sindy_model.equations())
 
     print("2) Train rivals (opt-in)...")
@@ -139,10 +145,8 @@ def main():
 
     # Validate trajectories at θ0*
     t, x_truth = simulate_pendulum(theta_next, 0.0, T=T, dt=dt, params=params)
-    # --- ADDED: Defensive check ---
     if x_truth.size == 0:
-        raise ValueError("simulate_pendulum returned empty trajectory. Check input parameters.")
-    # --- END ADDED ---
+        raise ValueError(f"simulate_pendulum returned empty trajectory for θ0={theta_next}. Check input parameters.")
     _, x_sindy = sindy_predict(sindy_model, np.array([theta_next, 0.0]), T, dt)
     if args.oed_rival == "linear":
         _, x_rival = simulate_lin(trained["linear"], theta_next, 0.0, T, dt)
@@ -174,5 +178,6 @@ def main():
     }
     (ART/"summary.json").write_text(json.dumps(out, indent=2))
     print(json.dumps(out, indent=2))
+
 if __name__ == "__main__":
     main()
