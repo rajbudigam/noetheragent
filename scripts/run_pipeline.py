@@ -34,6 +34,10 @@ def discover_with_sindy(params: PendulumParams, seeds=6, T=6.0, dt=0.01):
     thetas0 = rng.uniform(low=0.1, high=1.6, size=seeds) * rng.choice([-1,1], size=seeds)
     omegas0 = rng.uniform(low=-1.5, high=1.5, size=seeds)
     _, X, _ = stack_trajectories(thetas0, omegas0, T, dt, params)
+    # --- ADDED: Defensive check ---
+    if X.size == 0:
+        raise ValueError("stack_trajectories returned empty X. Check parameter ranges and seeds.")
+    # --- END ADDED ---
     t = np.tile(np.linspace(0.0, T, int(T/dt)+1), seeds)
     model = fit_sindy(X, t, library_kind="custom", threshold=0.08)
     (ART/"sindy_model.txt").write_text("\n".join(model.equations()))
@@ -97,10 +101,7 @@ def main():
 
     print("2) Train rivals (opt-in)...")
     trained = {}
-    # Linear rival always available
     trained["linear"] = LinearizedPendulum(g=params.g, L=params.L)
-    # For HNN/LNN, compute Xdot targets from training trajectories
-    # Re-generate Xdot cheaply for the concatenated X_train
     n = int(T/dt)+1
     Xdot = np.zeros_like(X_train)
     Xdot[1:-1] = (X_train[2:] - X_train[:-2]) / (2*dt)
@@ -123,7 +124,6 @@ def main():
     print(f"3) Model discrimination objective = {args.oed_objective}, rival = {args.oed_rival}")
     rival_sim = rival_sim_fn_factory(sindy_model, args.oed_rival, trained, params, T=T, dt=dt)
 
-    # Evaluate initial θ0 grid
     grid = np.linspace(0.1, 2.2, args.grid)
     scores = [objective_score(th, rival_sim, T=T, dt=dt,
                               objective=args.oed_objective, noise_sigma=args.noise_sigma)
@@ -139,6 +139,10 @@ def main():
 
     # Validate trajectories at θ0*
     t, x_truth = simulate_pendulum(theta_next, 0.0, T=T, dt=dt, params=params)
+    # --- ADDED: Defensive check ---
+    if x_truth.size == 0:
+        raise ValueError("simulate_pendulum returned empty trajectory. Check input parameters.")
+    # --- END ADDED ---
     _, x_sindy = sindy_predict(sindy_model, np.array([theta_next, 0.0]), T, dt)
     if args.oed_rival == "linear":
         _, x_rival = simulate_lin(trained["linear"], theta_next, 0.0, T, dt)
@@ -152,7 +156,6 @@ def main():
 
     ylabel = "T-opt discrepancy" if args.oed_objective=="topt" else "Info gain (KL surrogate)"
     plot_discrepancy(grid, scores, theta_next, ART/"discrepancy.png", ylabel=ylabel)
-    # We still plot linear vs truth vs SINDy for continuity, even if rival was HNN/LNN
     lin_tmp = LinearizedPendulum(g=params.g, L=params.L)
     _, x_lin = simulate_lin(lin_tmp, theta_next, 0.0, T, dt)
     plot_trajectories(t, x_truth, x_sindy, x_lin, ART/"trajectories.png")
@@ -171,6 +174,5 @@ def main():
     }
     (ART/"summary.json").write_text(json.dumps(out, indent=2))
     print(json.dumps(out, indent=2))
-
 if __name__ == "__main__":
     main()
