@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.env/
+.ipynb_checkpoints/
+
+# Build / cache
+dist/
+build/
+*.egg-info/
+
+# Artifacts
+artifacts/
+
+# OS
+.DS_Store
+
+# VSCode
+.vscode/
