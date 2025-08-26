@@ -2,6 +2,7 @@ import numpy as np
 import pysindy as ps
 
 def _col(x, i):
+    x = np.atleast_2d(x)
     return x[:, i:i+1]
 
 def make_pendulum_custom_library(include_interactions=True):
