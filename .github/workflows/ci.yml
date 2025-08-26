@@ -10,28 +10,30 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install deps
+
+      - name: Set up Python virtual environment and install dependencies
         run: |
           python -m venv .venv
           source .venv/bin/activate
           pip install -r requirements.txt
           pip install pytest
+          pip install -e .
 
-      - name: Install noetheragent package
-        run: pip install -e .
-  
       - name: Smoke pipeline (fast)
         run: |
           source .venv/bin/activate
           python scripts/run_pipeline.py --T 2.0 --dt 0.02 --seeds 3 --grid 8
           python -m noetheragent.formal.sympy_invariant
+
       - name: Run tests
         run: |
           source .venv/bin/activate
           pytest -q
+
       - name: Upload artifacts (for debugging)
         if: always()
         uses: actions/upload-artifact@v4
