@@ -5,27 +5,30 @@ from botorch.fit import fit_gpytorch_mll
 from botorch.acquisition import qExpectedImprovement
 from botorch.optim import optimize_acqf
 from gpytorch.mlls import ExactMarginalLogLikelihood
+from .info_objectives import t_opt_discrepancy, kl_discrimination
 
-def discrepancy_objective(theta0, rival_sim_fn, T, dt):
+def objective_score(theta0, rival_sim_fn, T, dt, objective="topt", noise_sigma=0.05):
     """
-    Deterministic 'T-optimal' proxy: L2 distance between rival trajectories.
-    theta0: scalar initial angle (radians); omega0=0.
-    rival_sim_fn: callable(theta0) -> (t, x_sindy, x_linear)
-    returns scalar discrepancy J(theta0)
+    Compute a scalar discrimination score at a proposed initial angle.
+    objective: 'topt' | 'kl'  (Gaussian KL surrogate)
     """
-    t, xs, xl = rival_sim_fn(theta0)
-    # We emphasize angle mismatch; you can add velocity as well
-    d = xs[:,0] - xl[:,0]
-    return float(np.trapz(d**2, t))
+    t, yA, yB = rival_sim_fn(theta0)  # y* are full state trajectories
+    # Use angle channel for discrimination (could extend to both)
+    aA, aB = yA[:, 0], yB[:, 0]
+    if objective == "topt":
+        return t_opt_discrepancy(t, aA, aB)
+    elif objective == "kl":
+        return kl_discrimination(t, aA, aB, sigma=noise_sigma)
+    else:
+        raise ValueError("unknown objective")
 
-def suggest_next_theta0(bounds, initial_thetas, initial_scores, n_candidates=1):
+def suggest_next_theta0(bounds, thetas, scores, n_candidates=1):
     """
     Fit a GP to (theta0 -> score) and propose next theta0 via qEI.
-    bounds: tuple (lo, hi) in radians
     """
-    X = torch.tensor(initial_thetas, dtype=torch.double).unsqueeze(-1)
-    Y = torch.tensor(initial_scores, dtype=torch.double).unsqueeze(-1)
-    # normalize targets
+    X = torch.tensor(thetas, dtype=torch.double).unsqueeze(-1)
+    Y = torch.tensor(scores, dtype=torch.double).unsqueeze(-1)
+    # z-score for numerical stability
     Y = (Y - Y.mean()) / (Y.std() + 1e-8)
 
     gp = SingleTaskGP(X, Y)
@@ -35,12 +38,7 @@ def suggest_next_theta0(bounds, initial_thetas, initial_scores, n_candidates=1):
     lo, hi = bounds
     bounds_t = torch.tensor([[lo], [hi]], dtype=torch.double)
 
-    qei = qExpectedImprovement(model=gp, best_f=Y.max())
-    cand, _ = optimize_acqf(
-        acq_function=qei,
-        bounds=bounds_t,
-        q=n_candidates,
-        num_restarts=10,
-        raw_samples=256,
-    )
+    acq = qExpectedImprovement(model=gp, best_f=Y.max())
+    cand, _ = optimize_acqf(acq_function=acq, bounds=bounds_t,
+                            q=n_candidates, num_restarts=10, raw_samples=256)
     return cand.detach().squeeze(-1).cpu().numpy().tolist()
